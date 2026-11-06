@@ -1,0 +1,188 @@
+#!/bin/bash
+# white-claw planner agent. Each tick, in order:
+#   A. Close goals whose planned issues are all closed (no model call).
+#   A2. If no goal is open and the repo has ROADMAP.md, file its next unfiled "## Goal: ..." section.
+#   B. If an open `goal` hasn't been planned: plan it into small ordered issues, labelled
+#      `planned` + `agent-ready` so the builder starts immediately.
+#   C. Otherwise triage open `from-review` follow-ups: approve real bugs/safety gaps
+#      (agent-ready), close nits. Capped at {{ agent_triage_daily_cap }} approvals per day so review
+#      suggestions can't spawn an endless chain of work.
+# One model call per tick at most.
+set -euo pipefail
+MAX_TURNS={{ agent_max_turns_plan }}
+MAX_ISSUES={{ agent_max_issues_per_goal }}
+TRIAGE_CAP={{ agent_triage_daily_cap }}
+{% raw %}
+REPO="${AGENT_REPO:?set by agent-run.sh}"
+WD="${AGENT_WORKDIR:?set by agent-run.sh}"
+STATE="${AGENT_STATE:?set by agent-run.sh}"
+
+exec 9>"$STATE/lock"
+flock -n 9 || { echo "[planner] previous run still active"; exit 0; }
+
+log() { echo "[planner] $*"; }
+comment() { gh api -X POST "repos/$REPO/issues/$1/comments" -f body="$2" >/dev/null; }
+ensure_label() { gh label create "$1" --repo "$REPO" --color "$2" --description "$3" >/dev/null 2>&1 || true; }
+
+run_claude() {  # prompt outfile
+  env -u GH_TOKEN claude -p "$1" --output-format json --max-turns "$MAX_TURNS" < /dev/null \
+    > "$2" 2> "${2%.json}.err" || true
+  jq -e '.result and (.is_error | not)' "$2" >/dev/null 2>&1
+}
+
+ensure_label planned c2e0c6 "Created by the planner agent"
+ensure_label goal-planned bfd4f2 "The planner has broken this goal into issues"
+ensure_label triaged ededed "The planner has decided on this follow-up"
+ensure_label agent-ready 0e8a16 "The builder agent will pick this up"
+
+cd "$WD"
+git fetch -q --prune origin
+git checkout -q --detach origin/main
+
+# ---- A. Close finished goals ------------------------------------------------
+for g in $(gh issue list --repo "$REPO" --state open --label goal-planned --json number --jq '.[].number'); do
+  states=$(gh issue list --repo "$REPO" --state all --limit 100 \
+    --search "\"Part of goal #$g.\" in:body" --json number,state --jq '.[] | "\(.number) \(.state)"')
+  [ -z "$states" ] && continue
+  if ! grep -q ' OPEN$' <<<"$states"; then
+    done_list=$(awk '{printf "- #%s\n", $1}' <<<"$states")
+    comment "$g" "## Done
+
+Every issue planned for this goal is closed:
+$done_list
+
+Closed by the planner agent."
+    gh issue close "$g" --repo "$REPO" --reason completed >/dev/null
+    log "goal #$g complete; closed"
+  fi
+done
+
+# ---- A2. Roadmap: no open goal -> file the next one from ROADMAP.md ---------
+if [ -f ROADMAP.md ] && [ -z "$(gh issue list --repo "$REPO" --state open --label goal --json number --jq '.[0].number // empty')" ]; then
+  all_titles=$(gh issue list --repo "$REPO" --state all --limit 500 --json title --jq '.[].title')
+  while IFS= read -r g; do
+    title=$(jq -r .title <<<"$g")
+    if grep -Fxq -- "$title" <<<"$all_titles"; then continue; fi   # already filed (open or done)
+    body="$(jq -r .body <<<"$g")
+
+_Filed automatically from ROADMAP.md by the planner agent._"
+    ensure_label goal 5319e7 "High-level goal for the planner agent"
+    url=$(gh issue create --repo "$REPO" --title "$title" --body "$body" --label goal)
+    log "roadmap: filed $title (${url##*/})"
+    break
+  done < <("$HOME/bin/wc-parse.py" roadmap 50 < ROADMAP.md | jq -c '.[]')
+fi
+
+# ---- B. Plan the oldest unplanned goal --------------------------------------
+goal=$(gh issue list --repo "$REPO" --state open --label goal --json number,labels \
+  --jq '[.[] | select(all(.labels[].name; . != "goal-planned"))] | sort_by(.number) | .[0].number // empty')
+
+if [ -n "$goal" ]; then
+  if [ -f "$STATE/goal-$goal.attempts" ] && [ "$(cat "$STATE/goal-$goal.attempts")" -ge 2 ]; then
+    log "goal #$goal failed twice; skipping (delete $STATE/goal-$goal.attempts to retry)"
+    exit 0
+  fi
+  goal_text=$(gh issue view "$goal" --repo "$REPO" --json title,body --jq '"\(.title)\n\n\(.body)"')
+  open_titles=$(gh issue list --repo "$REPO" --state open --limit 200 --json title --jq '.[].title')
+  log "planning goal #$goal"
+
+  if ! run_claude "Plan this goal for the repository checked out here.
+
+Goal #$goal:
+---
+$goal_text
+---
+
+Titles of issues that are already open (do not duplicate):
+---
+$open_titles
+---
+
+Follow the planning rules in your CLAUDE.md. Return only the JSON array." "$STATE/last-plan.json"; then
+    echo $(( $(cat "$STATE/goal-$goal.attempts" 2>/dev/null || echo 0) + 1 )) > "$STATE/goal-$goal.attempts"
+    log "claude run failed for goal #$goal; see $STATE/last-plan.err (will retry)"
+    exit 0
+  fi
+
+  items=$(jq -r '.result' "$STATE/last-plan.json" | "$HOME/bin/wc-parse.py" plan "$MAX_ISSUES")
+  if [ "$(jq length <<<"$items")" -eq 0 ]; then
+    comment "$goal" "Planner agent: nothing to plan. The goal looks done or is too vague to break down. Reword it and remove the \`goal-planned\` label to retry."
+    gh issue edit "$goal" --repo "$REPO" --add-label goal-planned >/dev/null
+    log "goal #$goal produced no issues"
+    exit 0
+  fi
+
+  checklist=""; filed=0
+  while IFS= read -r item; do
+    title=$(jq -r .title <<<"$item")
+    if grep -Fxq -- "$title" <<<"$open_titles"; then continue; fi
+    labels="planned,agent-ready"
+    case "$title" in "[human]"*) labels="planned" ;; esac   # needs a person (limits, CI, bench work)
+    body="$(jq -r .body <<<"$item")
+
+_Part of goal #$goal. Planned by the planner agent._"
+    url=$(gh issue create --repo "$REPO" --title "$title" --body "$body" --label "$labels")
+    checklist+="- [ ] #${url##*/} $title"$'\n'
+    filed=$((filed + 1))
+    log "filed: $title"
+  done < <(jq -c '.[]' <<<"$items")
+
+  comment "$goal" "## Plan
+
+The builder takes these one at a time, lowest number first. Issues titled \`[human]\` need a person and are not queued.
+
+$checklist"
+  gh issue edit "$goal" --repo "$REPO" --add-label goal-planned >/dev/null
+  log "goal #$goal planned into $filed issue(s), queued for the builder"
+  exit 0
+fi
+
+# ---- C. Triage reviewer follow-ups -----------------------------------------
+today=$(date +%F)
+approved_today=$(cat "$STATE/triage-$today" 2>/dev/null || echo 0)
+if [ "$approved_today" -ge "$TRIAGE_CAP" ]; then
+  log "triage cap reached for today ($approved_today/$TRIAGE_CAP)"
+  exit 0
+fi
+
+pending=$(gh issue list --repo "$REPO" --state open --label from-review --limit 20 \
+  --json number,title,body,labels \
+  --jq '[.[] | select(all(.labels[].name; . != "triaged" and . != "agent-ready")) | {number, title, body}]')
+if [ "$(jq length <<<"$pending")" -eq 0 ]; then
+  log "nothing to plan or triage"
+  exit 0
+fi
+
+log "triaging $(jq length <<<"$pending") follow-up(s)"
+if ! run_claude "Triage these follow-up issues filed by the reviewer agent. Read the code they refer to.
+
+$(jq -r '.[] | "### #\(.number) \(.title)\n\(.body)\n"' <<<"$pending")
+
+Follow the triage rules in your CLAUDE.md. Return only the JSON array." "$STATE/last-triage.json"; then
+  log "triage run failed; see $STATE/last-triage.err (will retry)"
+  exit 0
+fi
+
+decisions=$(jq -r '.result' "$STATE/last-triage.json" | "$HOME/bin/wc-parse.py" triage 20)
+valid=$(jq -r '.[].number' <<<"$pending")
+while IFS= read -r d; do
+  n=$(jq -r .number <<<"$d"); decision=$(jq -r .decision <<<"$d"); reason=$(jq -r .reason <<<"$d")
+  grep -Fxq -- "$n" <<<"$valid" || continue
+  if [ "$decision" = "approve" ]; then
+    if [ "$approved_today" -ge "$TRIAGE_CAP" ]; then
+      log "cap reached; #$n left for tomorrow"
+      continue
+    fi
+    gh issue edit "$n" --repo "$REPO" --add-label agent-ready --add-label triaged >/dev/null
+    comment "$n" "Planner agent: approved for the builder. $reason"
+    approved_today=$((approved_today + 1))
+    echo "$approved_today" > "$STATE/triage-$today"
+    log "approved #$n"
+  else
+    comment "$n" "Planner agent: closing, not worth a change right now. $reason"
+    gh issue edit "$n" --repo "$REPO" --add-label triaged >/dev/null
+    gh issue close "$n" --repo "$REPO" --reason "not planned" >/dev/null
+    log "closed #$n"
+  fi
+done < <(jq -c '.[]' <<<"$decisions")
+{% endraw %}
