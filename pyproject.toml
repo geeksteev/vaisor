@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vaisor"
+dynamic = ["version"]
+description = "Give AI hands and eyes on a real electronics bench."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2",
+    "pyyaml",
+    "pyserial",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+vaisor = "vaisor.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "vaisor.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["vaisor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,33 @@
+# Example bench description for vAIsor.
+# Copy to bench.yaml (gitignored) and edit it to match your instruments:
+#   cp bench.example.yaml bench.yaml
+
+# Schema version of this file. Only 1 exists so far.
+version: 1
+
+# A name for this bench, shown by the front doors.
+name: bench
+
+# Named device instances. Names must start with a lowercase letter and contain
+# only lowercase letters, digits, '_' or '-'. Two meters of different makes are
+# simply two entries here.
+devices:
+  dmm1:
+    # Device class: multimeter, camera, psu, scope, logic, flasher or relay.
+    class: multimeter
+    # Driver that speaks this instrument's protocol (<vendor>_<model>).
+    driver: extech_383273
+    # Optional free-text note for humans and AI callers.
+    description: Bench multimeter
+    # How to reach the instrument.
+    connection:
+      type: serial          # transport kind; only "serial" for now
+      port: /dev/ttyUSB0    # serial device (e.g. COM3 on Windows)
+      baudrate: 9600        # bits per second
+      bytesize: 8           # data bits: 5, 6, 7 or 8
+      parity: N             # N (none), E (even) or O (odd)
+      stopbits: 1           # 1 or 2
+      timeout: 1.0          # read timeout in seconds, must be > 0
+      # rts: true           # force the RTS line; leave unset to let the driver decide
+    # Limits for the safety layer (not enforced yet). A read-only meter needs none.
+    limits: {}
