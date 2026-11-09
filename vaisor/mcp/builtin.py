@@ -63,12 +63,12 @@ def bench_status(bench: Bench) -> dict[str, Any]:
         "bench": bench.config.name,
         "devices": [
             {
-                "name": d["name"],
-                "class": d["class"],
-                "driver": d["driver"],
-                "capabilities": d["capabilities"],
+                "name": i.name,
+                "class": i.device_class.value,
+                "driver": i.driver,
+                "capabilities": list(i.capabilities),
             }
-            for d in list_devices(bench)
+            for i in bench.devices()
         ],
         "estop": bench.estop_state(),
         "lock_holder": bench.lock.inspect(),

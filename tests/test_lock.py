@@ -289,3 +289,20 @@ def test_stale_recovery_concurrent_with_acquires_keeps_mutual_exclusion(tmp_path
     s.join(10)
     assert len(done) == 6
     assert not violations
+
+
+def test_inspect_absent_live_corrupt_and_stale(tmp_path):
+    p = tmp_path / "lock"
+    lock = BenchLock(p)
+    assert lock.inspect() is None
+
+    write_lock(p)
+    info = lock.inspect()
+    assert info["caller"] == "other" and info["stale"] is False
+
+    p.write_text("{not json")
+    assert lock.inspect()["corrupt"] is True
+
+    write_lock(p, pid=2**22 + 12345)
+    assert lock.inspect()["stale"] is True
+    assert p.exists()  # inspect never removes
