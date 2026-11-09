@@ -96,6 +96,23 @@ def test_bad_yaml_reports_line(tmp_path: Path) -> None:
     assert "line " in msg
 
 
+def test_duplicate_device_name_rejected(tmp_path: Path) -> None:
+    text = device_yaml() + device_yaml().split("devices:\n", 1)[1]
+    path = write(tmp_path, text)
+    msg = load_error(path)
+    assert str(path) in msg
+    assert "duplicate key 'dmm1'" in msg
+    assert "line " in msg
+
+
+def test_duplicate_limits_block_rejected(tmp_path: Path) -> None:
+    text = device_yaml(extra="    limits: {max_v: 5}\n    limits: {max_v: 50}\n")
+    msg = load_error(write(tmp_path, text))
+    assert "duplicate key 'limits'" in msg
+    last = len(text.splitlines())
+    assert f"line {last}," in msg
+
+
 @pytest.mark.parametrize("text", ["- a\n- b\n", "just a string\n", ""])
 def test_top_level_not_mapping(tmp_path: Path, text: str) -> None:
     msg = load_error(write(tmp_path, text))
