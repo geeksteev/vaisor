@@ -144,3 +144,93 @@ def test_gitignore_has_state_dir():
     root = os.path.dirname(os.path.dirname(__file__))
     with open(os.path.join(root, ".gitignore")) as fh:
         assert ".vaisor/" in fh.read().split()
+
+
+def test_two_shared_holders_overlap(tmp_path):
+    lock = BenchLock(tmp_path / "lock")
+    with lock.shared("a", 0), BenchLock(tmp_path / "lock").shared("b", 0):
+        assert len(list(lock.readers_dir.glob("*.json"))) == 2
+
+
+def test_exclusive_times_out_while_shared_and_cleans_up(tmp_path):
+    p = tmp_path / "lock"
+    with BenchLock(p).shared("r", 0):
+        with pytest.raises(LockTimeout):
+            BenchLock(p).acquire("w", 0.15)
+        assert not p.exists()
+    BenchLock(p).acquire("w", 0)
+
+
+def test_shared_times_out_while_exclusive(tmp_path):
+    p = tmp_path / "lock"
+    w = BenchLock(p)
+    w.acquire("w", 0)
+    with pytest.raises(LockTimeout):
+        with BenchLock(p).shared("r", 0.15):
+            pass
+    assert not list(w.readers_dir.glob("*.json"))
+    assert p.exists()
+    w.release()
+
+
+def test_stale_reader_does_not_block_exclusive(tmp_path):
+    p = tmp_path / "lock"
+    lock = BenchLock(p)
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    lock.readers_dir.mkdir()
+    stale = lock.readers_dir / "dead.json"
+    write_lock(stale, pid=proc.pid, token="dead")
+    lock.acquire("w", 0.5)
+    assert not stale.exists()
+    lock.release()
+
+
+def test_shared_release_removes_only_own_file(tmp_path):
+    lock = BenchLock(tmp_path / "lock")
+    with lock.shared("a", 0):
+        with BenchLock(tmp_path / "lock").shared("b", 0):
+            pass
+        assert len(list(lock.readers_dir.glob("*.json"))) == 1
+    assert not list(lock.readers_dir.glob("*.json"))
+
+
+def test_mixed_readers_writers_never_overlap(tmp_path):
+    p = tmp_path / "lock"
+    state = {"readers": 0, "writers": 0, "bad": 0, "ops": 0}
+    mu = threading.Lock()
+
+    def enter(kind):
+        with mu:
+            state[kind] += 1
+            state["ops"] += 1
+            if state["writers"] > 1 or (state["writers"] and state["readers"]):
+                state["bad"] += 1
+
+    def leave(kind):
+        with mu:
+            state[kind] -= 1
+
+    def reader():
+        for _ in range(15):
+            with BenchLock(p).shared("r", 20):
+                enter("readers")
+                time.sleep(0.002)
+                leave("readers")
+
+    def writer():
+        for _ in range(8):
+            with BenchLock(p).exclusive("w", 20):
+                enter("writers")
+                time.sleep(0.002)
+                leave("writers")
+
+    ts = [threading.Thread(target=reader) for _ in range(4)] + [
+        threading.Thread(target=writer) for _ in range(2)
+    ]
+    for th in ts:
+        th.start()
+    for th in ts:
+        th.join()
+    assert state["ops"] == 4 * 15 + 2 * 8
+    assert state["bad"] == 0

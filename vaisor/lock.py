@@ -7,6 +7,25 @@ A lock is *stale* when its holder's pid is gone (same host only), when
 ``acquired_at`` is older than ``stale_after`` seconds, or when the file is
 corrupt and its mtime is older than ``stale_after``. A stale file is removed by
 renaming it to a unique name and unlinking that, so only one recoverer wins.
+
+Shared (read-only) access
+-------------------------
+Readers register a file ``<lock>.readers/<token>.json`` (same JSON, same
+staleness rules; stale reader files are simply unlinked). Protocol:
+
+* Reader: (1) register its file, (2) check that no exclusive lock file exists.
+  If one does, deregister and wait/retry.
+* Writer: (1) create the exclusive lock file, (2) wait until the readers
+  directory has no live entries. On timeout it removes its lock file and raises
+  ``LockTimeout``.
+
+Race argument: each side writes its own marker *before* looking at the other's.
+Either the reader's check (2) comes after the writer's create (the reader sees
+the lock and backs off), or it comes before it, in which case the reader's
+registration precedes the writer's scan (the writer sees the reader and
+waits). Both cannot miss each other, so a writer and a reader are never active
+together. Readers that back off never wait while registered, and the writer
+only waits for readers that were already registered, so there is no deadlock.
 """
 
 from __future__ import annotations
@@ -79,10 +98,14 @@ class BenchLock:
         self._token: str | None = None
 
     # -- helpers ---------------------------------------------------------
-    def _read(self) -> dict[str, Any] | None:
+    @property
+    def readers_dir(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.readers")
+
+    def _read(self, path: Path | None = None) -> dict[str, Any] | None:
         """Return the parsed owner info, or None if corrupt (or missing)."""
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads((path or self.path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
         if not isinstance(data, dict):
@@ -93,11 +116,11 @@ class BenchLock:
             return None
         return data
 
-    def _is_stale(self, info: dict[str, Any] | None) -> bool:
+    def _is_stale(self, info: dict[str, Any] | None, path: Path | None = None) -> bool:
         now = time.time()
         if info is None:  # corrupt: judge by mtime
             try:
-                mtime = self.path.stat().st_mtime
+                mtime = (path or self.path).stat().st_mtime
             except OSError:
                 return False
             return now - mtime > self.stale_after
@@ -161,7 +184,7 @@ class BenchLock:
                         self.path.unlink()
                     raise
                 self._token = token
-                return
+                break
 
             info = self._read()
             if self._is_stale(info) and self._remove_if(info["token"] if info else None):
@@ -171,6 +194,35 @@ class BenchLock:
             if time.monotonic() >= deadline:
                 raise LockTimeout(self.path, info, timeout)
             time.sleep(min(POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+
+        # The lock file is ours; now wait for registered readers to leave.
+        try:
+            while True:
+                live = self._live_readers()
+                if not live:
+                    return
+                if time.monotonic() >= deadline:
+                    raise LockTimeout(self.path, live[0], timeout)
+                time.sleep(min(POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+        except BaseException:
+            self.release()
+            raise
+
+    def _live_readers(self) -> list[dict[str, Any]]:
+        """Return info of live readers, unlinking stale reader files."""
+        live: list[dict[str, Any]] = []
+        for f in self.readers_dir.glob("*.json"):
+            if not f.exists():
+                continue
+            info = self._read(f)
+            if self._is_stale(info, f):
+                with contextlib.suppress(OSError):
+                    f.unlink()
+                if self.on_stale is not None:
+                    self.on_stale(info if info is not None else {"corrupt": True})
+                continue
+            live.append(info if info is not None else {"corrupt": True})
+        return live
 
     def release(self) -> None:
         """Remove the lock file only if it is still ours."""
@@ -185,3 +237,43 @@ class BenchLock:
             yield
         finally:
             self.release()
+
+    @contextlib.contextmanager
+    def shared(self, caller: str, timeout: float = 0.0) -> Iterator[None]:
+        """Hold the bench for shared (read-only) access; many readers may overlap."""
+        token = self._register_reader(caller, timeout)
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                (self.readers_dir / f"{token}.json").unlink()
+
+    def _register_reader(self, caller: str, timeout: float) -> str:
+        self.readers_dir.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + timeout
+        token = uuid.uuid4().hex
+        rfile = self.readers_dir / f"{token}.json"
+        payload = {
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "caller": caller,
+            "acquired_at": time.time(),
+            "token": token,
+        }
+        while True:
+            # Register first (atomically via rename), then look for a writer.
+            tmp = self.readers_dir / f"{token}.tmp"
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, rfile)
+            if not self.path.exists():
+                return token
+            info = self._read()
+            if self._is_stale(info) and self._remove_if(info["token"] if info else None):
+                if self.on_stale is not None:
+                    self.on_stale(info if info is not None else {"corrupt": True})
+                continue  # still registered; re-check
+            with contextlib.suppress(OSError):
+                rfile.unlink()
+            if time.monotonic() >= deadline:
+                raise LockTimeout(self.path, info, timeout)
+            time.sleep(min(POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
