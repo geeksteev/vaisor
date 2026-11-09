@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 from collections.abc import Callable
@@ -55,6 +56,9 @@ class Bench:
             state = Path(base_dir) / state
         self.audit = audit if audit is not None else AuditLog(state / "audit.jsonl")
         self.lock = lock if lock is not None else BenchLock(state / "bench.lock")
+        self._lock_caller = "unknown"
+        if self.lock.on_stale is None:
+            self.lock.on_stale = self._audit_stale_lock
         self.lock_timeout = lock_timeout
         self.config = config
         self.estop_path = state / "estop.json"
@@ -86,6 +90,13 @@ class Bench:
                 )
             classes[name] = klass
         return cls(config, classes, transport_factory, **kwargs)
+
+    def _audit_stale_lock(self, owner: dict[str, Any]) -> None:
+        """Audit the takeover of a stale lock left by a dead or expired holder."""
+        self.audit.record(
+            {"caller": self._lock_caller, "command": "lock_takeover", "outcome": "ok",
+             "device": None, "args": {"stale_owner": owner}}
+        )
 
     def devices(self) -> list[DeviceInfo]:
         return [
@@ -145,6 +156,12 @@ class Bench:
         """
 
         def record(outcome: str, **extra: Any) -> None:
+            if isinstance(extra.get("args"), dict):
+                # NaN/inf are not JSON-safe; log them as strings so refusals can be audited.
+                extra["args"] = {
+                    k: repr(v) if isinstance(v, float) and not math.isfinite(v) else v
+                    for k, v in extra["args"].items()
+                }
             self.audit.record(
                 {"caller": caller, "command": capability, "outcome": outcome,
                  "device": device, **extra}
@@ -164,6 +181,7 @@ class Bench:
             )
 
         actuating = capability in ACTUATING_CAPABILITIES
+        self._lock_caller = caller
         if actuating:
             self._refuse_if_latched(refuse)
         record("attempt", args=args)

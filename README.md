@@ -37,6 +37,9 @@ entries. See the commented [`bench.example.yaml`](bench.example.yaml) and `examp
 The file is validated at startup with clear errors. Use `--config PATH` or `VAISOR_CONFIG` to point
 at another file.
 
+## Safety
+Limits, the bench lock, the e-stop and the audit log are described in [`docs/safety.md`](docs/safety.md).
+
 ## Supported hardware
 See [`docs/hardware.md`](docs/hardware.md). Adding your instrument is a driver, a sample config, and
 tests with recorded data: no hardware needed in CI.
