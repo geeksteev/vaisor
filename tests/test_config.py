@@ -217,3 +217,34 @@ def test_device_info_is_frozen() -> None:
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         info.name = "other"  # type: ignore[misc]
+
+
+def test_merge_key_override_is_not_duplicate(tmp_path: Path) -> None:
+    text = """\
+devices:
+  dmm1: &base
+    class: multimeter
+    driver: extech_383273
+    connection: {type: serial, port: /dev/ttyUSB0}
+  dmm2:
+    <<: *base
+    connection: {type: serial, port: /dev/ttyUSB1}
+"""
+    cfg = load_bench(write(tmp_path, text))
+    assert set(cfg.devices) == {"dmm1", "dmm2"}
+    assert cfg.devices["dmm2"].connection.port == "/dev/ttyUSB1"  # type: ignore[union-attr]
+
+
+def test_duplicate_explicit_key_next_to_merge_still_rejected(tmp_path: Path) -> None:
+    text = """\
+devices:
+  dmm1: &base
+    class: multimeter
+    driver: extech_383273
+    connection: {type: serial, port: /dev/ttyUSB0}
+  dmm2:
+    <<: *base
+    connection: {type: serial, port: /dev/ttyUSB1}
+    connection: {type: serial, port: /dev/ttyUSB2}
+"""
+    assert "duplicate key 'connection'" in load_error(write(tmp_path, text))

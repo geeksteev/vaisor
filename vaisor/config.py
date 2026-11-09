@@ -108,9 +108,12 @@ class _UniqueKeyLoader(yaml.SafeLoader):
     """SafeLoader that rejects duplicate mapping keys instead of keeping the last one."""
 
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
-        self.flatten_mapping(node)
+        # Check only the node's own explicit keys, before merge keys are flattened,
+        # so that overriding a key pulled in via ``<<: *anchor`` stays valid YAML.
         seen: set[Any] = set()
         for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
             try:
                 key = self.construct_object(key_node, deep=True)
                 hash(key)
