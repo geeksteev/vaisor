@@ -92,6 +92,8 @@ def typed_limits(dev: DeviceConfig) -> BaseModel:
 class BenchConfig(_Strict):
     version: Literal[1] = 1
     name: str = "bench"
+    # Runtime state (lock, ...), relative to the bench file unless absolute.
+    state_dir: str = Field(default=".vaisor", min_length=1)
     devices: dict[str, DeviceConfig]
 
     @field_validator("devices", mode="before")
