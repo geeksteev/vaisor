@@ -250,6 +250,30 @@ class BenchLock:
             self.release()
             raise
 
+    def inspect(self) -> dict[str, Any] | None:
+        """Read-only view of the exclusive holder; never acquires, removes or writes.
+
+        Returns ``{caller, pid, host, acquired_at, stale}`` or ``None`` when no
+        lock file exists. A corrupt file is reported as ``{"corrupt": True, "stale": ...}``.
+
+        The read does not take the recovery guard used when stealing a stale
+        lock, so a read that races a steal may see a torn file and report
+        ``corrupt: True`` transiently. That is acceptable for a status view.
+        """
+        if not self.path.exists():
+            return None
+        info = self._read()
+        stale = self._is_stale(info)
+        if info is None:
+            return {"corrupt": True, "stale": stale}
+        return {
+            "caller": info.get("caller"),
+            "pid": info["pid"],
+            "host": info.get("host"),
+            "acquired_at": info["acquired_at"],
+            "stale": stale,
+        }
+
     def _live_readers(self) -> list[dict[str, Any]]:
         """Return info of live readers, unlinking stale reader files."""
         live: list[dict[str, Any]] = []

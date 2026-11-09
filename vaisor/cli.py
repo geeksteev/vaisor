@@ -100,18 +100,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _info_dict(info: DeviceInfo) -> dict[str, object]:
-    return {
-        "name": info.name,
-        "class": info.device_class.value,
-        "driver": info.driver,
-        "port": info.connection.port,
-        "capabilities": list(info.capabilities),
-    }
-
-
 def _print_devices(infos: list[DeviceInfo], as_json: bool) -> None:
-    rows = [_info_dict(i) for i in infos]
+    rows = [i.to_dict() for i in infos]
     if as_json:
         print(json.dumps(rows))
         return
