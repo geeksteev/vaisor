@@ -179,3 +179,15 @@ def test_silent_meter(bench_file: str, capsys: pytest.CaptureFixture[str]) -> No
     assert main(["--config", bench_file, "read", "dmm1"], transport_factory=f) == 1
     assert "timeout" in capsys.readouterr().err
     assert not f.created[0].is_open
+
+
+def test_read_writes_audit_line(bench_file: str, tmp_path: Path) -> None:
+    rc = main(
+        ["--config", bench_file, "read", "dmm1", "--caller", "me"],
+        transport_factory=Factory("dcv_neg_12_3"),
+    )
+    assert rc == 0
+    lines = (tmp_path / ".vaisor" / "audit.jsonl").read_text().splitlines()
+    recs = [json.loads(x) for x in lines]
+    assert [r["outcome"] for r in recs] == ["attempt", "ok"]
+    assert recs[0]["caller"] == "me" and recs[0]["command"] == "read_measurement"

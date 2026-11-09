@@ -13,11 +13,13 @@ import time
 from collections.abc import Callable
 
 from vaisor import __version__
+from vaisor.audit import AuditError
 from vaisor.bench import Bench
 from vaisor.config import BenchConfigError, SerialConnection, load_bench
 from vaisor.device import DeviceInfo
 from vaisor.drivers.base import DriverError
 from vaisor.measurement import Reading
+from vaisor.safety import SafetyRefused
 from vaisor.transport import Transport, TransportError
 
 MAX_CONSECUTIVE_ERRORS = 5
@@ -71,6 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_read = sub.add_parser("read", help="read a measurement from a multimeter")
     p_read.add_argument("device", help="device name from the bench file")
+    p_read.add_argument(
+        "--caller", default="cli", help="caller name recorded in the audit log (default cli)"
+    )
     p_read.add_argument("--jsonl", action="store_true", help="one JSON object per line")
     p_read.add_argument("--watch", action="store_true", help="read repeatedly")
     p_read.add_argument(
@@ -153,11 +158,9 @@ def _cmd_read(bench: Bench, args: argparse.Namespace) -> int:
         )
 
     if not args.watch:
-        drv = bench.device(args.device)
-        _emit(drv.read_measurement(), args.jsonl)  # type: ignore[attr-defined]
+        _emit(bench.run(args.caller, args.device, READ_CAPABILITY), args.jsonl)
         return 0
 
-    drv = bench.device(args.device)
     done = 0
     consecutive = 0
     try:
@@ -166,7 +169,7 @@ def _cmd_read(bench: Bench, args: argparse.Namespace) -> int:
                 time.sleep(args.interval)
             done += 1
             try:
-                reading = drv.read_measurement()  # type: ignore[attr-defined]
+                reading = bench.run(args.caller, args.device, READ_CAPABILITY)
             except (DriverError, TransportError) as exc:
                 consecutive += 1
                 print(f"vaisor: error: {exc}", file=sys.stderr, flush=True)
@@ -199,11 +202,12 @@ def main(
     try:
         config = load_bench(path)
         kwargs = {} if transport_factory is None else {"transport_factory": transport_factory}
+        kwargs["base_dir"] = os.path.dirname(os.path.abspath(path))
         bench = Bench.from_config(config, **kwargs)  # type: ignore[arg-type]
     except BenchConfigError as exc:
         print(f"vaisor: error: {exc}", file=sys.stderr)
         return 2
-    except (DriverError, TransportError) as exc:
+    except (DriverError, TransportError, AuditError) as exc:
         print(f"vaisor: error: {exc}", file=sys.stderr)
         return 1
 
@@ -216,7 +220,7 @@ def main(
     except BenchConfigError as exc:
         print(f"vaisor: error: {exc}", file=sys.stderr)
         return 2
-    except (DriverError, TransportError) as exc:
+    except (DriverError, TransportError, AuditError, SafetyRefused) as exc:
         print(f"vaisor: error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
