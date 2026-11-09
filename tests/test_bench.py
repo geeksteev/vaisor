@@ -62,6 +62,30 @@ def test_device_is_lazy_cached_and_closed() -> None:
     bench.close()  # idempotent
 
 
+class FailingOpenTransport(FakeTransport):
+    def open(self) -> None:
+        super().open()
+        raise OSError("port busy")
+
+
+def test_failed_open_closes_transport_and_allows_retry() -> None:
+    made: list[FakeTransport] = []
+
+    def factory(conn: SerialConnection) -> Transport:
+        t = FailingOpenTransport() if not made else FakeTransport()
+        made.append(t)
+        return t
+
+    bench = Bench.from_config(make_config(), DRIVERS, factory)
+    with pytest.raises(DriverError, match="dmm1.*port busy"):
+        bench.device("dmm1")
+    assert not made[0].is_open
+    assert bench._open == {}
+    assert bench.device("dmm1").transport is made[1]
+    assert made[1].is_open
+    bench.close()
+
+
 def test_close_without_opening_anything() -> None:
     factory = Factory()
     Bench.from_config(make_config(), DRIVERS, factory).close()

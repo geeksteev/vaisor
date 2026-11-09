@@ -67,8 +67,19 @@ class Bench:
         drv = self._open.get(name)
         if drv is None:
             dev = self.config.devices[name]
-            drv = self._classes[name](name, dev, self._transport_factory(dev.connection))
-            drv.open()
+            transport = self._transport_factory(dev.connection)
+            drv = self._classes[name](name, dev, transport)
+            try:
+                drv.open()
+            except Exception as exc:
+                # Release the port so a later retry is not blocked.
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+                if isinstance(exc, DriverError):
+                    raise
+                raise DriverError(f"device '{name}': failed to open: {exc}") from exc
             self._open[name] = drv
         return drv
 
