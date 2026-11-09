@@ -1,0 +1,18 @@
+# Sample bench.yaml for an Extech 383273 multimeter on an RS232/USB adapter.
+version: 1
+name: bench
+devices:
+  dmm1:
+    class: multimeter
+    driver: extech_383273
+    description: Extech 383273 bench multimeter
+    connection:
+      type: serial
+      port: /dev/ttyUSB0
+      baudrate: 9600
+      bytesize: 8
+      parity: N
+      stopbits: 1
+      timeout: 1.0
+      rts: false   # the meter stays silent while RTS is high
+    limits: {}
