@@ -13,9 +13,9 @@ Create the `vaisor` package and everything needed to read a real instrument from
 - First driver: **Extech 383273 multimeter** (`vaisor/drivers/multimeter/extech_383273.py`). Protocol:
   9600 8N1, RTS must be held LOW or the meter stays silent. Poll by sending one SPACE (0x20); never send
   the reserved bytes `9 4 2 1 E G N R W U S T X`. Reply is 5 bytes `02 | function/range | lo | hi | 03`.
-  Digits word = `hi << 8 | lo`: bit 0 polarity (1 = negative; for frequency 1 = MHz), bit 1 leading digit (0/1),
+  Digits word = `hi << 8 | lo`: bit 0 polarity (1 = positive, 0 = negative; for frequency 0 = kHz, 1 = MHz), bit 1 leading digit (0/1),
   bits 2-5, 6-9, 10-13 the next three digits with **each 4-bit field stored MSB-first**, bits 14-15 decimal
-  point (00 none, 01 `000.0`, 10 `00.00`, 11 `0.000`). The manual's example `02 0C 21 B1 03` must decode to -12.3.
+  point (00 none, 01 `000.0`, 10 `00.00`, 11 `0.000`). The manual's example `02 0C 21 B1 03` must decode to +12.3 kΩ (function code 0x0C = OHM 200 kΩ).
   Function codes include 0x00-0x04 DCV 200mV/2V/20V/200V/1000V, 0x21 DCA 20A, 0x22 DCA 200mA, 0x24 DCA 20mA,
   0x28 DCA 2mA, 0x30 DCA 200µA, 0x80-0x84 ACV, 0x08-0x11 OHM ranges; mark the table "verify against manual".
   Digits outside 0-9 mean overrange/special: report value as None.
