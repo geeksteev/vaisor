@@ -255,6 +255,10 @@ class BenchLock:
 
         Returns ``{caller, pid, host, acquired_at, stale}`` or ``None`` when no
         lock file exists. A corrupt file is reported as ``{"corrupt": True, "stale": ...}``.
+
+        The read does not take the recovery guard used when stealing a stale
+        lock, so a read that races a steal may see a torn file and report
+        ``corrupt: True`` transiently. That is acceptable for a status view.
         """
         if not self.path.exists():
             return None
