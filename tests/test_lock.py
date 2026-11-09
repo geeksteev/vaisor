@@ -234,3 +234,58 @@ def test_mixed_readers_writers_never_overlap(tmp_path):
         th.join()
     assert state["ops"] == 4 * 15 + 2 * 8
     assert state["bad"] == 0
+
+
+def test_stale_recovery_concurrent_with_acquires_keeps_mutual_exclusion(tmp_path):
+    p = tmp_path / "lock"
+    state = {"inside": 0}
+    violations = []
+    mu = threading.Lock()
+    stop = threading.Event()
+    done = []
+
+    def seeder():
+        # Simulate crashed holders: dead-pid lock files appear whenever the path is free.
+        n = 0
+        while not stop.is_set():
+            n += 1
+            try:
+                fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                time.sleep(0.0002)
+                continue
+            info = {
+                "pid": 2**22 + 12345,
+                "host": socket.gethostname(),
+                "caller": "dead",
+                "acquired_at": time.time(),
+                "token": f"dead{n}",
+            }
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(info))
+
+    def worker():
+        lock = BenchLock(p, stale_after=300)
+        for _ in range(40):
+            lock.acquire("w", timeout=60)
+            with mu:
+                state["inside"] += 1
+                if state["inside"] != 1:
+                    violations.append(state["inside"])
+            time.sleep(0.0005)
+            with mu:
+                state["inside"] -= 1
+            lock.release()
+        done.append(1)
+
+    s = threading.Thread(target=seeder)
+    workers = [threading.Thread(target=worker) for _ in range(6)]
+    s.start()
+    for t in workers:
+        t.start()
+    for t in workers:
+        t.join(120)
+    stop.set()
+    s.join(10)
+    assert len(done) == 6
+    assert not violations

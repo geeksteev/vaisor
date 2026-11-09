@@ -6,7 +6,8 @@ Windows) holding JSON ``{pid, host, caller, acquired_at, token}``.
 A lock is *stale* when its holder's pid is gone (same host only), when
 ``acquired_at`` is older than ``stale_after`` seconds, or when the file is
 corrupt and its mtime is older than ``stale_after``. A stale file is removed by
-renaming it to a unique name and unlinking that, so only one recoverer wins.
+unlinking it in place under a separate recovery guard file that serialises all
+removals (token re-verified under the guard), so a live lock is never moved or lost.
 
 Shared (read-only) access
 -------------------------
@@ -42,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 POLL_INTERVAL = 0.05
+GUARD_STALE_AFTER = 5.0
 
 
 class LockTimeout(Exception):
@@ -135,25 +137,65 @@ class BenchLock:
         renamed to a unique name first so that only one caller can win; if what
         we grabbed turns out to be a different owner's lock, it is put back.
         """
-        grabbed = self.path.with_name(f"{self.path.name}.{uuid.uuid4().hex}.rm")
-        try:
-            os.rename(self.path, grabbed)
-        except OSError:
-            return False
-        try:
+        with self._guard() as held:
+            if not held:
+                return False
             try:
-                data = json.loads(grabbed.read_text(encoding="utf-8"))
+                data = json.loads(self.path.read_text(encoding="utf-8"))
                 found = data.get("token") if isinstance(data, dict) else None
+            except FileNotFoundError:
+                return False
             except (OSError, ValueError):
                 found = None
-            if found == token:
-                return True
-            with contextlib.suppress(OSError):  # restore; fails if re-created meanwhile
-                os.link(grabbed, self.path)
-            return False
+            if found != token:
+                return False
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                return False
+            return True
+
+    @property
+    def _guard_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.recover")
+
+    @contextlib.contextmanager
+    def _guard(self) -> Iterator[bool]:
+        """Serialise every removal of the lock file (stale recovery and release).
+
+        The guard is a separate ``O_EXCL`` file. All removals happen under it, so
+        check-token-then-unlink cannot interleave with another removal, and the
+        lock file is never renamed away: a live owner's lock never disappears.
+        A guard left by a crashed process is broken after ``GUARD_STALE_AFTER``
+        seconds. Yields False if the guard could not be taken in time.
+        """
+        deadline = time.monotonic() + GUARD_STALE_AFTER * 2
+        held = False
+        while True:
+            try:
+                fd = os.open(self._guard_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                try:
+                    age = time.time() - self._guard_path.stat().st_mtime
+                except OSError:
+                    continue  # vanished; retry
+                if age > GUARD_STALE_AFTER:
+                    with contextlib.suppress(OSError):
+                        self._guard_path.unlink()
+                    continue
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.001)
+                continue
+            os.close(fd)
+            held = True
+            break
+        try:
+            yield held
         finally:
-            with contextlib.suppress(OSError):
-                grabbed.unlink()
+            if held:
+                with contextlib.suppress(OSError):
+                    self._guard_path.unlink()
 
     # -- API -------------------------------------------------------------
     def acquire(self, caller: str, timeout: float = 0.0) -> None:
