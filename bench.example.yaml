@@ -8,6 +8,10 @@ version: 1
 # A name for this bench, shown by the front doors.
 name: bench
 
+# Directory for runtime state such as the bench lock. Relative paths are
+# relative to this file. Default: .vaisor (gitignored).
+# state_dir: .vaisor
+
 # Named device instances. Names must start with a lowercase letter and contain
 # only lowercase letters, digits, '_' or '-'. Two meters of different makes are
 # simply two entries here.
