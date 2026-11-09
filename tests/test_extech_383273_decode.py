@@ -13,7 +13,7 @@ def _put(w: int, first_bit: int, width: int, val: int) -> int:
 def encode(digits: str, dp: int, negative: bool, code: int = 0x00) -> bytes:
     """Build a frame from 4 display digits (first is 0/1), dp code 0-3."""
     assert len(digits) == 4
-    w = int(negative)
+    w = 0 if negative else 1  # bit 0: 1 = positive
     w |= int(digits[0]) << 1
     for start, ch in zip((2, 6, 10), digits[1:]):
         w = _put(w, start, 4, int(ch))
@@ -28,13 +28,14 @@ def _expected(digits: str, dp: int, neg: bool) -> float:
 
 def test_manual_example():
     r = decode_frame(bytes.fromhex("020C21B103"))
-    assert r.value == -12.3
+    assert r.value == 12.3
+    assert (r.function, r.unit, r.range) == ("resistance", "kΩ", "200kΩ")
     assert not r.overrange
     assert r.raw == bytes.fromhex("020C21B103")
 
 
 def test_encode_matches_manual():
-    assert encode("0123", 1, True, 0x0C) == bytes.fromhex("020C21B103")
+    assert encode("0123", 1, False, 0x0C) ==bytes.fromhex("020C21B103")
 
 
 @pytest.mark.parametrize(
@@ -97,10 +98,14 @@ def test_function_codes(code, function, unit):
     assert (r.function, r.unit) == (function, unit)
 
 
+def test_negative_when_bit0_clear():
+    assert decode_frame(encode("0123", 1, True, 0x01)).value == -12.3
+
+
 def test_resistance_range_unknown():
-    r = decode_frame(encode("0123", 1, False, 0x0C))
+    r = decode_frame(encode("0123", 1, False, 0x08))
     assert r.function == "resistance"
-    assert r.range == "code_0x0C"
+    assert r.range == "code_0x08"
     assert r.unit is None
 
 

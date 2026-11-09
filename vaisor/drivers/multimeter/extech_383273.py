@@ -8,7 +8,8 @@ The meter replies with a 5-byte frame::
 
 The digits word is ``w = hi << 8 | lo``. Bit numbers below are bits of ``w``.
 
-* bit 0: polarity, 1 = negative. For frequency functions, 1 = MHz instead.
+* bit 0: polarity, 1 = positive, 0 = negative. For frequency functions,
+  0 = kHz and 1 = MHz instead.
 * bit 1: leading digit (0 or 1).
 * bits 2-5, 6-9, 10-13: the next three digits.
 * bits 14-15: decimal point code: 00 = ``0000``, 01 = ``000.0``,
@@ -18,8 +19,9 @@ Every multi-bit field is stored MSB-first: the lowest-numbered bit of a field
 is its most significant bit. E.g. the digit in bits 2-5 is
 ``(b2<<3)|(b3<<2)|(b4<<1)|b5`` and the decimal point code is ``(b14<<1)|b15``.
 
-Worked example from the manual: ``02 0C 21 B1 03`` -> ``w = 0xB121``: negative,
-leading digit 0, digits 1, 2, 3, code 01 -> display ``012.3`` -> -12.3.
+Worked example from the manual: ``02 0C 21 B1 03`` -> ``w = 0xB121``: positive,
+leading digit 0, digits 1, 2, 3, dp code 01 -> display ``012.3``; function code
+``0x0C`` is OHM 200 kΩ, so the reading is +12.3 kΩ.
 
 A digit field decoding to 10-15 means overrange or a special display; the
 reading then has ``value=None`` and ``overrange=True``.
@@ -73,6 +75,8 @@ FUNCTION_TABLE: dict[int, tuple[str, str | None, str | None]] = {
 for _code in range(0x08, 0x12):
     FUNCTION_TABLE[_code] = ("resistance", f"code_0x{_code:02X}", None)
 del _code
+# Only 0x0C (200 kΩ) is confirmed by the manual's example.
+FUNCTION_TABLE[0x0C] = ("resistance", "200kΩ", "kΩ")
 
 
 def _field(w: int, first_bit: int, width: int) -> int:
@@ -99,7 +103,7 @@ def decode_frame(frame: bytes, device: str = "") -> Reading:
     )
 
     bit0 = w & 1
-    negative = bit0 == 1
+    negative = bit0 == 0
     if function.startswith("frequency"):
         negative = False
         if bit0:

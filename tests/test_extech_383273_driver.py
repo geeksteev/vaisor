@@ -31,6 +31,7 @@ def test_dcv_negative() -> None:
     with drv:
         r = drv.read_measurement()
     assert r.value == -12.3
+    assert (r.function, r.unit) == ("voltage_dc", "V")
     assert r.device == "dmm1"
     assert t.rts_history == [False]
     assert t.written == [b" "]
@@ -46,7 +47,7 @@ def test_overrange() -> None:
 def test_resync() -> None:
     drv, t = make("garbage_then_frame")
     with drv:
-        assert drv.read_measurement().value == -12.3
+        assert drv.read_measurement().value == 12.3
     assert t.written == [b" "]
 
 
