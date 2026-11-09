@@ -104,6 +104,29 @@ def _format_validation_error(path: Path, exc: ValidationError) -> str:
     return "\n".join(lines)
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate mapping keys instead of keeping the last one."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        self.flatten_mapping(node)
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            try:
+                key = self.construct_object(key_node, deep=True)
+                hash(key)
+            except TypeError:
+                continue  # unhashable keys are reported by the base class
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def load_bench(path: str | Path) -> BenchConfig:
     """Load and validate a bench file, raising :class:`BenchConfigError` on any problem."""
     path = Path(path)
@@ -115,7 +138,7 @@ def load_bench(path: str | Path) -> BenchConfig:
         raise BenchConfigError(f"{path}: cannot read bench file: {exc.strerror}") from None
 
     try:
-        data = yaml.safe_load(text)
+        data = yaml.load(text, Loader=_UniqueKeyLoader)  # SafeLoader subclass
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         problem = getattr(exc, "problem", None) or str(exc)
