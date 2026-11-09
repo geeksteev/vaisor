@@ -20,6 +20,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 from pydantic_core import PydanticCustomError
 
@@ -95,6 +96,23 @@ class BenchConfig(_Strict):
     # Runtime state (lock, ...), relative to the bench file unless absolute.
     state_dir: str = Field(default=".vaisor", min_length=1)
     devices: dict[str, DeviceConfig]
+    # Optional relay device the e-stop opens to cut power after outputs are off.
+    estop_relay: str | None = None
+
+    @model_validator(mode="after")
+    def _check_estop_relay(self) -> BenchConfig:
+        name = self.estop_relay
+        if name is None:
+            return self
+        dev = self.devices.get(name)
+        if dev is None:
+            valid = ", ".join(sorted(self.devices)) or "none"
+            raise ValueError(f"estop_relay '{name}' is not a configured device (devices: {valid})")
+        if dev.device_class is not DeviceClass.RELAY:
+            raise ValueError(
+                f"estop_relay '{name}' must be a relay device, it is a {dev.device_class.value}"
+            )
+        return self
 
     @field_validator("devices", mode="before")
     @classmethod
