@@ -13,7 +13,17 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
+from pydantic_core import PydanticCustomError
+
+from vaisor.limits import LimitsError, limits_model_for, validate_limits
 
 DEVICE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
@@ -60,6 +70,24 @@ class DeviceConfig(_Strict):
     limits: dict[str, Any] = Field(default_factory=dict)
     description: str | None = None
 
+    @field_validator("limits")
+    @classmethod
+    def _check_limits(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+        device_class = info.data.get("device_class")
+        if device_class is None:  # class itself invalid; already reported
+            return value
+        try:
+            return validate_limits(device_class, value)
+        except LimitsError as exc:
+            raise PydanticCustomError(
+                "limits_invalid", "invalid limits", {"issues": exc.issues}
+            ) from None
+
+
+def typed_limits(dev: DeviceConfig) -> BaseModel:
+    """Return the validated limits of ``dev`` as its class's limits model instance."""
+    return limits_model_for(dev.device_class).model_validate(dev.limits)
+
 
 class BenchConfig(_Strict):
     version: Literal[1] = 1
@@ -94,6 +122,11 @@ def _format_loc(loc: tuple[int | str, ...]) -> str:
 def _format_validation_error(path: Path, exc: ValidationError) -> str:
     lines = []
     for err in exc.errors(include_url=False):
+        if err["type"] == "limits_invalid":
+            for sub, issue in err["ctx"]["issues"]:
+                loc = _format_loc(tuple(err["loc"]) + ((sub,) if sub else ()))
+                lines.append(f"{path}: {loc}: {issue}")
+            continue
         msg = err["msg"]
         if err["type"] == "union_tag_not_found":
             expected = ", ".join(sorted(_CONNECTION_TYPES))
