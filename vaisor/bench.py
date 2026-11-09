@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +18,7 @@ from vaisor.device import DeviceInfo
 from vaisor.drivers.base import Driver, DriverError
 from vaisor.lock import BenchLock, LockTimeout
 from vaisor.registry import discover_drivers, get_driver
-from vaisor.safety import ACTUATING_CAPABILITIES, SafetyRefused, check_command
+from vaisor.safety import ACTUATING_CAPABILITIES, ESTOPPED, SafetyRefused, check_command
 from vaisor.transport import Transport, make_transport
 
 UNKNOWN_DEVICE = "unknown_device"
@@ -54,6 +57,7 @@ class Bench:
         self.lock = lock if lock is not None else BenchLock(state / "bench.lock")
         self.lock_timeout = lock_timeout
         self.config = config
+        self.estop_path = state / "estop.json"
         self._classes = driver_classes
         self._transport_factory = transport_factory
         self._open: dict[str, Driver] = {}
@@ -159,8 +163,10 @@ class Bench:
                 UNKNOWN_CAPABILITY, f"device '{device}' has no capability '{capability}'"
             )
 
-        record("attempt", args=args)
         actuating = capability in ACTUATING_CAPABILITIES
+        if actuating:
+            self._refuse_if_latched(refuse)
+        record("attempt", args=args)
         guard = (
             self.lock.exclusive(caller, self.lock_timeout)
             if actuating
@@ -168,6 +174,9 @@ class Bench:
         )
         try:
             with guard:
+                if actuating:
+                    # Re-check: the latch may have been set while we waited for the lock.
+                    self._refuse_if_latched(refuse)
                 try:
                     limits: Any = typed_limits(dev)
                 except ValidationError:
@@ -186,6 +195,110 @@ class Bench:
                 return result
         except LockTimeout as exc:
             raise refuse(LOCK_TIMEOUT, str(exc)) from exc
+
+    def estop_state(self) -> dict[str, Any] | None:
+        """The latch contents if the e-stop is latched, else ``None``.
+
+        An unreadable or corrupt latch file still counts as latched (fail safe).
+        """
+        try:
+            text = self.estop_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            return {"error": f"cannot read latch: {exc}"}
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return {"error": "corrupt latch file"}
+        return data if isinstance(data, dict) else {"error": "corrupt latch file"}
+
+    def _refuse_if_latched(self, refuse: Callable[[str, str], SafetyRefused]) -> None:
+        state = self.estop_state()
+        if state is not None:
+            why = state.get("reason") or state.get("error") or "no reason given"
+            raise refuse(ESTOPPED, f"e-stop is latched ({why}); clear it to actuate")
+
+    def estop(self, caller: str, reason: str = "") -> dict[str, Any]:
+        """Latch the e-stop, turn off every output and open the e-stop relay.
+
+        Never takes the bench lock and keeps going past individual failures.
+        Returns ``{"latched", "ok", "results"}``; each result has ``device``,
+        ``command``, ``ok`` and ``error`` when it failed.
+        """
+        results: list[dict[str, Any]] = []
+
+        def audit(command: str, outcome: str, device: str | None, **extra: Any) -> None:
+            try:
+                self.audit.record(
+                    {"caller": caller, "command": command, "outcome": outcome,
+                     "device": device, **extra}
+                )
+            except Exception:
+                pass  # the e-stop must proceed even if auditing is broken
+
+        def step(device: str, command: str, **args: Any) -> None:
+            audit(command, "attempt", device, args=args)
+            try:
+                getattr(self.device(device), command)(**args)
+            except Exception as exc:
+                results.append(
+                    {"device": device, "command": command, "ok": False, "error": str(exc)}
+                )
+                audit(command, "error", device, args=args, error=str(exc))
+            else:
+                results.append({"device": device, "command": command, "ok": True})
+                audit(command, "ok", device, args=args)
+
+        latched = True
+        try:
+            self.estop_path.parent.mkdir(parents=True, exist_ok=True)
+            body = {
+                "caller": caller,
+                "reason": reason,
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+            fd, tmp = tempfile.mkstemp(dir=self.estop_path.parent, prefix=".estop-")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(body, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.estop_path)
+        except Exception as exc:
+            latched = False
+            results.append({"device": None, "command": "latch", "ok": False, "error": str(exc)})
+
+        for name in self.config.devices:
+            if "output_off" in self._classes[name].capabilities:
+                step(name, "output_off")
+        relay = self.config.estop_relay
+        if relay is not None:
+            step(relay, "relay_set", closed=False)
+
+        ok = latched and all(r["ok"] for r in results)
+        extra: dict[str, Any] = {} if ok else {"error": "one or more e-stop steps failed"}
+        audit(
+            "estop", "ok" if ok else "error", None,
+            args={"reason": reason},
+            result={"latched": latched, "ok": ok, "results": results},
+            **extra,
+        )
+        return {"latched": latched, "ok": ok, "results": results}
+
+    def clear_estop(self, caller: str) -> bool:
+        """Remove the latch. Returns whether one was present. Audited."""
+        base: dict[str, Any] = {"caller": caller, "command": "clear_estop", "device": None}
+        self.audit.record({**base, "outcome": "attempt"})
+        try:
+            self.estop_path.unlink()
+            existed = True
+        except FileNotFoundError:
+            existed = False
+        except OSError as exc:
+            self.audit.record({**base, "outcome": "error", "error": str(exc)})
+            raise DriverError(f"cannot clear e-stop latch: {exc}") from exc
+        self.audit.record({**base, "outcome": "ok", "result": {"was_latched": existed}})
+        return existed
 
     def close(self) -> None:
         """Close every device that was opened; keeps going if one fails."""

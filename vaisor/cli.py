@@ -92,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="stop after N readings with --watch",
     )
+
+    p_estop = sub.add_parser("estop", help="e-stop: outputs off, relay cut, latch actuation")
+    p_estop.add_argument("--clear", action="store_true", help="clear the e-stop latch")
+    p_estop.add_argument("--caller", default="cli", help="caller name for the audit log")
+    p_estop.add_argument("--reason", default="manual e-stop from cli", help="why")
     return parser
 
 
@@ -144,6 +149,19 @@ def _emit(reading: Reading, jsonl: bool) -> None:
 def _cmd_devices(bench: Bench, args: argparse.Namespace) -> int:
     _print_devices(bench.devices(), args.json)
     return 0
+
+
+def _cmd_estop(bench: Bench, args: argparse.Namespace) -> int:
+    if args.clear:
+        was = bench.clear_estop(args.caller)
+        print("e-stop cleared" if was else "e-stop was not latched")
+        return 0
+    result = bench.estop(args.caller, args.reason)
+    for r in result["results"]:
+        status = "ok" if r["ok"] else f"FAILED: {r['error']}"
+        print(f"{r['device'] or 'latch'}: {r['command']}: {status}")
+    print("e-stop latched" if result["latched"] else "e-stop NOT latched", file=sys.stderr)
+    return 0 if result["ok"] else 1
 
 
 def _cmd_read(bench: Bench, args: argparse.Namespace) -> int:
@@ -211,7 +229,8 @@ def main(
         print(f"vaisor: error: {exc}", file=sys.stderr)
         return 1
 
-    handler = _cmd_devices if args.command == "devices" else _cmd_read
+    handlers = {"devices": _cmd_devices, "estop": _cmd_estop, "read": _cmd_read}
+    handler = handlers[args.command]
     try:
         return handler(bench, args)
     except UsageError as exc:
