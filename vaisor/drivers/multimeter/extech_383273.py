@@ -27,9 +27,20 @@ reading then has ``value=None`` and ``overrange=True``.
 
 from __future__ import annotations
 
+import logging
+from typing import ClassVar
+
 from vaisor.drivers.base import DriverError
+from vaisor.drivers.multimeter import Multimeter
 from vaisor.measurement import Reading
 
+log = logging.getLogger(__name__)
+
+POLL = b" "
+# The meter treats these ASCII characters as commands; never transmit them.
+RESERVED_BYTES = b"9421EGNRWUSTX"
+MAX_DISCARD = 16
+TIMEOUT_MSG = "timeout: no reply from meter (is RTS low / meter on / RS232 enabled?)"
 STX = 0x02
 ETX = 0x03
 FRAME_LEN = 5
@@ -118,3 +129,52 @@ def decode_frame(frame: bytes, device: str = "") -> Reading:
         overrange=overrange,
         raw=bytes(frame),
     )
+
+
+class Extech383273(Multimeter):
+    """Extech 383273 over RS232: RTS held low, one SPACE polls one frame."""
+
+    capabilities: ClassVar[frozenset[str]] = frozenset({"read_measurement"})
+
+    def open(self) -> None:
+        conn = self.config.connection
+        wanted = (9600, 8, "N", 1)
+        actual = (conn.baudrate, conn.bytesize, conn.parity, conn.stopbits)
+        if actual != wanted:
+            log.warning(
+                "%s: Extech 383273 needs 9600 8N1 but config has %d %d%s%d; "
+                "the meter will probably not answer",
+                self.name,
+                *actual,
+            )
+        super().open()
+        self.transport.set_rts(False)
+
+    def _send(self, data: bytes) -> None:
+        bad = sorted(set(data) & set(RESERVED_BYTES))
+        if bad:
+            names = ", ".join("0x%02X" % b for b in bad)
+            raise DriverError("refusing to send reserved command byte(s) " + names)
+        self.transport.write(data)
+
+    def read_measurement(self) -> Reading:
+        timeout = self.config.connection.timeout
+        self.transport.reset_input()
+        self._send(POLL)
+        buf = self.transport.read(FRAME_LEN, timeout)
+        if len(buf) < FRAME_LEN:
+            raise DriverError(TIMEOUT_MSG)
+        discarded = 0
+        while buf[0] != STX:
+            idx = buf.find(bytes([STX]))
+            skip = len(buf) if idx < 0 else idx
+            discarded += skip
+            if discarded > MAX_DISCARD:
+                raise DriverError(
+                    "no frame start from meter within %d bytes" % MAX_DISCARD
+                )
+            buf = buf[skip:]
+            buf += self.transport.read(FRAME_LEN - len(buf), timeout)
+            if len(buf) < FRAME_LEN:
+                raise DriverError(TIMEOUT_MSG)
+        return decode_frame(buf, device=self.name)

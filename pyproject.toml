@@ -20,6 +20,9 @@ dev = ["pytest"]
 [project.scripts]
 vaisor = "vaisor.cli:main"
 
+[project.entry-points."vaisor.drivers"]
+extech_383273 = "vaisor.drivers.multimeter.extech_383273:Extech383273"
+
 [tool.setuptools.dynamic]
 version = { attr = "vaisor.__version__" }
 
